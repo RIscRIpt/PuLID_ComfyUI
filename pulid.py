@@ -16,6 +16,7 @@ from .eva_clip.constants import OPENAI_DATASET_MEAN, OPENAI_DATASET_STD
 from .encoders import IDEncoder
 
 INSIGHTFACE_DIR = os.path.join(folder_paths.models_dir, "insightface")
+FACEXLIB_DIR = os.path.join(folder_paths.models_dir, "facexlib")
 
 MODELS_DIR = os.path.join(folder_paths.models_dir, "pulid")
 if "pulid" not in folder_paths.folder_names_and_paths:
@@ -32,7 +33,7 @@ class PulidModel(nn.Module):
         self.image_proj_model = self.init_id_adapter()
         self.image_proj_model.load_state_dict(model["image_proj"])
         self.ip_layers = To_KV(model["ip_adapter"])
-    
+
     def init_id_adapter(self):
         image_proj_model = IDEncoder()
         return image_proj_model
@@ -70,7 +71,7 @@ def tensor_to_size(source, dest_size):
         source = torch.cat((source, source[-1:].repeat(shape)), dim=0)
     elif source_size > dest_size:
         source = source[:dest_size]
-    
+
     return source
 
 def set_model_patch_replace(model, patch_kwargs, key):
@@ -84,7 +85,7 @@ def set_model_patch_replace(model, patch_kwargs, key):
         to["patches_replace"]["attn2"] = {}
     else:
         to["patches_replace"]["attn2"] = to["patches_replace"]["attn2"].copy()
-    
+
     if key not in to["patches_replace"]["attn2"]:
         to["patches_replace"]["attn2"][key] = Attn2Replace(pulid_attention, **patch_kwargs)
         model.model_options["transformer_options"] = to
@@ -95,8 +96,8 @@ class Attn2Replace:
     def __init__(self, callback=None, **kwargs):
         self.callback = [callback]
         self.kwargs = [kwargs]
-    
-    def add(self, callback, **kwargs):          
+
+    def add(self, callback, **kwargs):
         self.callback.append(callback)
         self.kwargs.append(kwargs)
 
@@ -111,7 +112,7 @@ class Attn2Replace:
         for i, callback in enumerate(self.callback):
             if sigma <= self.kwargs[i]["sigma_start"] and sigma >= self.kwargs[i]["sigma_end"]:
                 out = out + callback(out, q, k, v, extra_options, **self.kwargs[i])
-        
+
         return out.to(dtype=dtype)
 
 def pulid_attention(out, q, k, v, extra_options, module_key='', pulid=None, cond=None, uncond=None, weight=1.0, ortho=False, ortho_v2=False, mask=None, **kwargs):
@@ -130,7 +131,7 @@ def pulid_attention(out, q, k, v, extra_options, module_key='', pulid=None, cond
     #conds = torch.cat([conds, zero_tensor], dim=1)
     #ip_k = pulid.ip_layers.to_kvs[k_key](conds)
     #ip_v = pulid.ip_layers.to_kvs[v_key](conds)
-    
+
     k_cond = pulid.ip_layers.to_kvs[k_key](cond).repeat(batch_prompt, 1, 1)
     k_uncond = pulid.ip_layers.to_kvs[k_key](uncond).repeat(batch_prompt, 1, 1)
     v_cond = pulid.ip_layers.to_kvs[v_key](cond).repeat(batch_prompt, 1, 1)
@@ -139,7 +140,7 @@ def pulid_attention(out, q, k, v, extra_options, module_key='', pulid=None, cond
     ip_v = torch.cat([(v_cond, v_uncond)[i] for i in cond_or_uncond], dim=0)
 
     out_ip = optimized_attention(q, ip_k, ip_v, extra_options["n_heads"])
-        
+
     if ortho:
         out = out.to(dtype=torch.float32)
         out_ip = out_ip.to(dtype=torch.float32)
@@ -217,7 +218,7 @@ class PulidModelLoader:
                 elif key.startswith("ip_adapter."):
                     st_model["ip_adapter"][key.replace("ip_adapter.", "")] = model[key]
             model = st_model
-        
+
         # Also initialize the model, takes longer to load but then it doesn't have to be done every time you change parameters in the apply node
         model = PulidModel(model)
 
@@ -296,7 +297,7 @@ class ApplyPulid:
 
     def apply_pulid(self, model, pulid, eva_clip, face_analysis, image, weight, start_at, end_at, method=None, noise=0.0, fidelity=None, projection=None, attn_mask=None):
         work_model = model.clone()
-        
+
         device = comfy.model_management.get_torch_device()
         dtype = comfy.model_management.unet_dtype()
         if dtype not in [torch.float32, torch.float16, torch.bfloat16]:
@@ -324,7 +325,7 @@ class ApplyPulid:
             num_zero = 0
             ortho = False
             ortho_v2 = False
-        
+
         if fidelity is not None:
             num_zero = fidelity
 
@@ -341,7 +342,7 @@ class ApplyPulid:
         )
 
         face_helper.face_parse = None
-        face_helper.face_parse = init_parsing_model(model_name='bisenet', device=device)
+        face_helper.face_parse = init_parsing_model(model_name='bisenet', device=device, model_rootpath=FACEXLIB_DIR)
 
         bg_label = [0, 16, 18, 7, 8, 9, 14, 15]
         cond = []
@@ -371,7 +372,7 @@ class ApplyPulid:
             if len(face_helper.cropped_faces) == 0:
                 # No face detected, skip this image
                 continue
-            
+
             face = face_helper.cropped_faces[0]
             face = image_to_tensor(face).unsqueeze(0).permute(0,3,1,2).to(device)
             parsing_out = face_helper.face_parse(T.functional.normalize(face, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]))[0]
@@ -382,7 +383,7 @@ class ApplyPulid:
             # apparently MPS only supports NEAREST interpolation?
             face_features_image = T.functional.resize(face_features_image, eva_clip.image_size, T.InterpolationMode.BICUBIC if 'cuda' in device.type else T.InterpolationMode.NEAREST).to(device, dtype=dtype)
             face_features_image = T.functional.normalize(face_features_image, eva_clip.image_mean, eva_clip.image_std)
-            
+
             id_cond_vit, id_vit_hidden = eva_clip(face_features_image, return_all_features=False, return_hidden=True, shuffle=False)
             id_cond_vit = id_cond_vit.to(device, dtype=dtype)
             for idx in range(len(id_vit_hidden)):
@@ -402,7 +403,7 @@ class ApplyPulid:
                     id_vit_hidden_uncond.append(torch.zeros_like(id_vit_hidden[idx]))
                 else:
                     id_vit_hidden_uncond.append(torch.rand_like(id_vit_hidden[idx]) * noise)
-            
+
             cond.append(pulid_model.get_image_embeds(id_cond, id_vit_hidden))
             uncond.append(pulid_model.get_image_embeds(id_uncond, id_vit_hidden_uncond))
 
@@ -410,7 +411,7 @@ class ApplyPulid:
             # No faces detected, return the original model
             print("pulid warning: No faces detected in any of the given images, returning unmodified model.")
             return (work_model,)
-        
+
         # average embeddings
         cond = torch.cat(cond).to(device, dtype=dtype)
         uncond = torch.cat(uncond).to(device, dtype=dtype)
